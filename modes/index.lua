@@ -23,5 +23,7 @@ modes = {
 	require "modes.dawn_of_sorrow",
 	require "modes.portrait_of_ruin",
 	require "modes.order_of_ecclesia",
-	require "modes.symphony_of_the_night"
+	require "modes.symphony_of_the_night",
+	require "modes.dw_basic",
+	require "modes.z2"
 }
