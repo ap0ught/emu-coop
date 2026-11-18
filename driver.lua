@@ -27,7 +27,13 @@ function memoryWrite(addr, value, size)
 	if not size or size == 1 then
 		memory.writebyte(addr, value)
 	elseif size == 2 then
-		memory.writeword(addr, value)
+		if memory["writeword"] ~= nil then
+			memory.writeword(addr, value)
+		else
+			-- fceux doesn't have a writeword, so do it ourselves.
+			memory.writebyte(addr, AND(0xff, value))
+			memory.writebyte(addr+1, AND(0xff, bit.rshift(value, 8)))
+		end
 	elseif size == 4 then
 		memory.writedword(addr, value)
 	else
@@ -69,30 +75,37 @@ function recordChanged(record, value, previousValue, receiving)
 	elseif record.kind == "high" then
 		allow = AND(maskedValue, value) > AND(maskedValue, previousValue)
 		value = maskedValue
+	elseif record.kind == "flags" then
+		if receiving then
+			-- value is from the message; previousValue is the value currently in memory
+			local changedBits = unalteredValue[2]
+			value = OR(previousValue, AND(changedBits, maskedValue))
+			value = AND(value, BNOT(AND(changedBits, BNOT(maskedValue))))
+			allow = value ~= previousValue
+		else
+			allow = maskedValue ~= previousValue
+			local changedBits = XOR(maskedValue, previousValue)
+			value = { maskedValue, changedBits }
+		end
 	elseif record.kind == "bitOr" then
 		allow = maskedValue ~= previousValue               -- Did operated-on bits change?
 		if receiving then
 			value = OR(maskedValue, previousValue)
-		end
-	elseif record.kind == "flags" then
-		if receiving then
-			-- value is value from the message, previousValue is current value locally
-			local changedBits = unalteredValue[2]
-			-- Set any bits that should be set
-			value = OR(previousValue, AND(changedBits, maskedValue))
-			-- Clear any bits that should be cleared
-			value = AND(value, BNOT(AND(changedBits, BNOT(maskedValue))))
-			-- Only accept if changed
-			allow = value ~= previousValue
 		else
-			-- Sending out. maskedValue is current value locally, previousValue is value from the memory cache
-			allow = maskedValue ~= previousValue -- Did operated-on bits change?
-			local changedBits = XOR(maskedValue, previousValue)
-			-- stuff both into a single value for the message
-			value = { maskedValue, changedBits }
+			value = maskedValue
+		end
+	elseif record.kind == "bitAnd" then
+		allow = maskedValue ~= previousValue               -- Did operated-on bits change?
+		if receiving then
+			value = AND(maskedValue, previousValue)
+		else
+			value = maskedValue
 		end
 	elseif record.kind == "delta" then
 		if not receiving then
+			if record.ignoreZeroBoundary and (AND(mask, value) == 0 or AND(mask, previousValue) == 0) then
+				return false, unalteredValue
+			end
 			allow = maskedValue ~= previousValue
 			value = AND(mask, value) - AND(mask, previousValue)
 		else
@@ -102,7 +115,6 @@ function recordChanged(record, value, previousValue, receiving)
 			if record.deltaMin and maskedSum < record.deltaMin then maskedSum = record.deltaMin end
 			if record.deltaMax and maskedSum > record.deltaMax then maskedSum = record.deltaMax end
 			value = OR( AND(inverseMask, previousValue), AND(mask, maskedSum) )
-			maskedValue = maskedSum
 		end
 	else
 		allow = maskedValue ~= previousValue
@@ -120,7 +132,6 @@ function performTest(record, valueOverride, sizeOverride)
 	if type(record) == "function" then
 		return record(valueOverride, sizeOverride)
 	elseif record[1] == "test" then
-		if record.addr + (sizeOverride or record.size or 1) >= memory.getbussize() then return false end
 		local value = valueOverride or memoryRead(record.addr, sizeOverride or record.size)
 		return (not record.gte or value >= record.gte) and
 			   (not record.lte or value <= record.lte)
@@ -128,7 +139,6 @@ function performTest(record, valueOverride, sizeOverride)
 		local test = record.value
 		local len = #test
 		local addr = record.addr
-		if addr + len >= memory.getbussize() then return false end
 
 		for i=1,len do
 			if string.byte(test, i) ~= memory.readbyte(addr + i - 1) then
@@ -145,10 +155,13 @@ class.GameDriver(Driver)
 function GameDriver:_init(spec, forceSend)
 	self.spec = spec
 	self.sleepQueue = {}
-	self.nextFrameTasks = {}
-	self.tasks = {}
 	self.forceSend = forceSend
 	self.didCache = false
+end
+
+function GameDriver:resync()
+	self.didCache = false
+	self.forceSend = true
 end
 
 function GameDriver:checkFirstRunning() -- Do first-frame bootup-- only call if isRunning()
@@ -156,16 +169,17 @@ function GameDriver:checkFirstRunning() -- Do first-frame bootup-- only call if 
 		if driverDebug then print("First moment running") end
 		message("Coop mode: " .. self.spec.guid)
 
-		-- Initialize cache
-		for k,v in pairs(self.spec.sync) do
+		for k,v in pairs(self.spec.sync) do -- Enter all current values into cache so we don't send pointless 0 values later
 			local value = memoryRead(k, v.size)
 			if not cache[k] then cache[k] = value end
 
 			if self.forceSend then -- Restoring after a crash send all values regardless of importance
 				if value ~= 0 then -- FIXME: This is adequate for all current specs but maybe it will not be in future?!
-					if driverDebug then print("Sending address " .. tostring(k) .. " at startup") end
+					if v.kind ~= "delta" then
+						if driverDebug then print("Sending address " .. toxstring(k) .. " at startup") end
 
-					self:sendTable {addr=k, value=value}
+						self:sendTable {addr=k, value=value}
+					end
 				end
 			end
 		end
@@ -178,27 +192,7 @@ function GameDriver:checkFirstRunning() -- Do first-frame bootup-- only call if 
 	end
 end
 
-function GameDriver:executeNextFrame(f)
-	table.insert(self.nextFrameTasks, f)
-end
-
-function GameDriver:executeAfterFrames(f, n)
-	table.insert(self.tasks, {f=f, n=n})
-end
-
 function GameDriver:childTick()
-	-- Execute queued tasks
-	for k,v in pairs(self.nextFrameTasks) do v() end
-	self.nextFrameTasks = {}
-	for i=#self.tasks,1,-1 do
-		local task = self.tasks[i]
-		task.n = task.n - 1
-		if task.n == 0 then
-			task.f()
-			table.remove(self.tasks, i)
-		end
-	end
-
 	if self:isRunning() then
 		self:checkFirstRunning()
 
@@ -216,68 +210,25 @@ function GameDriver:childTick()
 end
 
 function GameDriver:childWake()
-	self:sendTable {"hello", version=version.release, guid=self.spec.guid, nickname=self.pipe.data.nickname}
+	self:sendTable {op="hello", version=version.release, guid=self.spec.guid}
 
-	if driverDebug then print("Registering callbacks") end
-	-- Register memory callbacks
-	self.registeredAddresses = {}
-	-- BizHawk memory callback arguments are addr, value, flags
-	-- not all cores return all args though.
-	-- FCEUX callback arguments are addr, size, value
-	-- snes9x callback arguments are addr, and probably flags
-	-- In mgba we can't count on any captured variables since there's only one callback
-	-- so we'll rely on just the address returned.
-	--[[ Cores generally/only call callbacks on the base address of the write operation, meaning
-		if it's a 4-byte write, the callback is called for the first of the 4. 
-		In order to make the life of the modder easier, so they don't have to worry about and test
-		the alignment of writes to each address, as well as to handle situations in which the game
-		might use different alignments for the same address, we use this strategy where we call
-		caughtWrite for all addresses that may be associated with the triggered address.
-		This means caughtWrite must tolerate extra calls and ignore if nothing has changed.
-	--]]
-	local function theMemoryCallback(callbackAddr, value, flags)
-		-- Check all addresses this callback may be associated with, both backward and forward.
-		for i=-registerSize+1,registerSize-1 do
-			local unalignedAddress = callbackAddr + i
-			local record = mainDriver.spec.sync[unalignedAddress]
-			if record then
-				local recordSize = record.size or 1
-				-- Only trigger records behind if their size is large enough to intersect
-				if unalignedAddress + recordSize > callbackAddr then
-					mainDriver:caughtWrite(unalignedAddress, 0, record, recordSize)
-				end
-			end
-		end
-	end
-
-	-- All provided addresses
 	for k,v in pairs(self.spec.sync) do
-		-- Assuming the writes may be aligned with any offset, we'll have to register for both aligned and unaligned
-		-- This loops through 4,2, and 1-byte aligned, depending on the register size of the current console
-		local s = registerSize
+		local syncTable = self.spec.sync -- Assume sync table is not replaced at runtime
+		local baseAddr = k - (k%2)       -- 16-bit aligned equivalent of address
 		local size = v.size or 1
-		while s >= 1 do
-			local alignedAddress = k - (k % s)
-			-- only register one callback per address
-			if not self.registeredAddresses[alignedAddress] then
-				-- size arg is used in FCEUX & snes9x
-				memory.registerwrite(alignedAddress, size, theMemoryCallback)
-				self.registeredAddresses[alignedAddress] = true
+
+		local function callback(a,b) -- I have no idea what "b" is but snes9x passes it
+			-- So, this is pretty awful: There is a bug in some versions of snes9x-rr where you if you have registered a registerwrite for an even and odd address,
+			-- SOMETIMES (not always) writing to the odd address will trigger the even address's callback instead. So when we get a callback we trigger the underlying
+			-- callback twice, once for each byte in the current word. This does mean caughtWrite() must tolerate spurious extra calls.
+			for offset=0,1 do
+				local checkAddr = baseAddr + offset
+				local record = syncTable[checkAddr]
+				if record then self:caughtWrite(checkAddr, b, record, size) end
 			end
-			s = math.floor(s / 2)
 		end
 
-		-- Also register ahead in case a size was requested that's bigger than the actual writes
-		-- Modes should not have any overlap in their registration. It's possible we get bad behavior if
-		-- we pass a size 1 here but that conflicts with a different sync table.
-		for s = 1,size-1 do
-			local inflatedAddress = k + s
-			if not self.registeredAddresses[inflatedAddress] then
-				-- size arg is used in FCEUX & snes9x
-				memory.registerwrite(inflatedAddress, 1, theMemoryCallback)
-				self.registeredAddresses[inflatedAddress] = true
-			end
-		end
+		memory.registerwrite (k, size, callback)
 	end
 end
 
@@ -294,13 +245,14 @@ function GameDriver:caughtWrite(addr, arg2, record, size)
 		local allow = true
 		local value = memoryRead(addr, size)
 		local sendValue = value
+		local previousValue = cache[addr]
 
 		if record.writeTrigger then
-			record.writeTrigger(value, cache[addr], false)
+			record.writeTrigger(value, previousValue, false)
 		end
 
 		if cache[addr] then -- It should be impossible for this to be false
-			allow, sendValue = recordChanged(record, value, cache[addr], false)
+			allow, sendValue = recordChanged(record, value, previousValue, false)
 		end
 
 		if allow then
@@ -311,30 +263,35 @@ function GameDriver:caughtWrite(addr, arg2, record, size)
 			cache[addr] = value
 
 			self:sendTable {addr=addr, value=sendValue}
+		elseif record.kind == "delta" and record.ignoreZeroBoundary then
+			local mask = 0xff
+			if record.size == 2 then mask = 0xffff
+			elseif record.size == 4 then mask = 0xffffffff
+			end
+			if record.mask then mask = record.mask end
+			if previousValue and (AND(mask, value) == 0 or AND(mask, previousValue) == 0) then
+				cache[addr] = value
+			end
 		end
-		-- Also update cache for trigger types
-		if record.kind == "trigger" then cache[addr] = value end
 	else
 		if driverDebug then print("Ignored memory write because the game is not running") end
 	end
 end
 
 function GameDriver:handleTable(t)
-	if t[1] then
-		if t[1] == "hello" then
+	if t.op then
+		if t.op == "hello" then
 			if t.guid ~= self.spec.guid then
 				self.pipe:abort("Partner has an incompatible .lua file for this game.")
 				print("Partner's game mode file has guid:\n" .. tostring(t.guid) .. "\nbut yours has:\n" .. tostring(self.spec.guid))
-			else
-				self.pipe:confirm()
 			end
-		elseif t[1] == "custom" then
-			if t[2] then
-				local f = self.spec.custom and self.spec.custom[t[2]]
+		elseif t.op == "custom" then
+			if t.name then
+				local f = self.spec.custom and self.spec.custom[t.name]
 				if f then
-					f(t[3], t[4])
+					f(t.payload)
 				else
-					print("Unrecognized custom message from partner: " .. t[2])
+					print("Unrecognized custom message from partner: " .. t.name)
 				end
 			end
 		end
@@ -370,8 +327,7 @@ function GameDriver:handleTable(t)
 					names = {name}
 				elseif record.nameBitmap then
 					names = {}
-					local maxBit = (8 * (record.size or 1)) - 1
-					for b=0,maxBit do
+					for b=0,7 do
 						if 0 ~= AND(BIT(b), value) and 0 == AND(BIT(b), previousValue) then
 							table.insert(names, record.nameBitmap[b + 1])
 						end
@@ -381,16 +337,16 @@ function GameDriver:handleTable(t)
 				if names then
 					local verb = record.verb or "got"
 					for i, v in ipairs(names) do
-						message(self.pipe:getPartnerName(t.clientId) .. " " .. verb .. " " .. v)
+						message("Partner " .. verb .. " " .. v)
 					end
 				else
-					if driverDebug then print("Updated anonymous address " .. tostring(addr) .. " to " .. tostring(value)) end
+					if driverDebug then print("Updated anonymous address " .. toxstring(addr) .. " to " .. tostring(value)) end
 				end
 				record.cache = value
 				memoryWrite(addr, value, record.size)
 			end
 		else
-			if driverDebug then print("Unknown memory address was " .. tostring(addr)) end
+			if driverDebug then print("Unknown memory address was " .. toxstring(addr)) end
 			message("Partner changed unknown memory address...? Uh oh")
 		end
 	else
@@ -407,5 +363,5 @@ function send(name, payload) -- Global for mode files
 	if not name then
 		error("Missing message name on send() call")
 	end
-	mainDriver:sendTable {"custom", name, payload}
+	mainDriver:sendTable {op="custom", name=name, payload=payload}
 end

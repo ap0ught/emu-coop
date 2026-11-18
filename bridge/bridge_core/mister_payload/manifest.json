@@ -1,0 +1,18 @@
+{
+  "helper": {
+    "filename": "mister-helper.py",
+    "version": "2.0 beta8",
+    "remote_path": "/media/fat/Scripts/z1rr-coop/mister-helper.py",
+    "log_path": "/media/fat/Scripts/z1rr-coop/mister-helper.log",
+    "port": 55355
+  },
+  "roms": {
+    "remote_dir": "/media/fat/games/NES/z1rr-coop"
+  },
+  "core": {
+    "filename": "NES_z1rr-coop.rbf",
+    "version": "2.0 beta8",
+    "remote_path": "/media/fat/_Console/NES_z1rr-coop.rbf",
+    "required": true
+  }
+}

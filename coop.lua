@@ -1,12 +1,12 @@
-print(_VERSION)
+-- Make vendored libraries (json.lua) findable on FCEUX's Lua
+package.path = package.path .. ";.\\vendor\\?.lua;./vendor/?.lua"
 
 class   = require "pl.class"
 pretty  = require "pl.pretty"
-List    = require "pl.list"
+List    = require "pl.List"
 stringx = require "pl.stringx"
 tablex  = require "pl.tablex"
 
-require "emu_compat"
 require "version"
 require "util"
 
@@ -17,7 +17,6 @@ require "driver"
 
 -- PROGRAM
 
-function runcoop()
 if emu.emulating() then
 	local spec = nil -- Mode specification
 	
@@ -47,94 +46,59 @@ if emu.emulating() then
 
 	if spec then -- If user did not hit cancel
 		print("Playing " .. spec.name)
-		local failed = false
-		function scrub(invalid) errorMessage(invalid .. " not valid") failed = true end
-		function trim(t)
-			-- Strip out stray whitespace (this can be a problem on FCEUX)
-			for _,v in ipairs{"server", "nick", "partner"} do
-				if t[v] then t[v] = t[v]:gsub("%s+", "") end
+
+		local data = connectionDialog()
+
+		if data then -- If user did not hit cancel
+			local failed = false
+
+			function scrub(invalid) errorMessage(invalid .. " not valid") failed = true end
+
+			-- Strip out stray whitespace
+			for _, v in ipairs({"host_addr", "code"}) do
+				if data[v] then data[v] = data[v]:gsub("%s+", "") end
 			end
-		end
 
-		if spec.pipe == "irc" then
-			local data = ircDialog()
-
-			if data then -- If user did not hit cancel
-				trim(data)
-
-				-- Check input valid
-				if not nonempty(data.server) then scrub("Server")
+			-- Validate based on transport
+			if data.kind == "direct" then
+				if not nonempty(data.host_addr) then scrub("Host address")
 				elseif not nonzero(data.port) then scrub("Port")
-				elseif not nonempty(data.nick) then scrub("Nick")
-				elseif not nonempty(data.partner) then scrub("Partner nick")
 				end
-
-				function connect()
-					local sock = Socket()
-					sock:connect(data.server, data.port)
-					--result, err = server:connect(data.server, data.port)
-
-					--TODO error messages
-					--if not result then errorMessage("Could not connect to IRC: " .. err) failed = true return end
-
-					statusMessage("Connecting to server...")
-
-					mainDriver = GameDriver(spec, data.forceSend) -- Notice: This is a global, specs can use it
-					IrcPipe(data, mainDriver):wake(sock)
+			elseif data.kind == "relay" then
+				if not nonempty(data.host_addr) then scrub("Relay address")
+				elseif not nonzero(data.port) then scrub("Port")
+				elseif not nonempty(data.code) or #data.code < 6 then scrub("Session code (must be 6+ chars)")
 				end
-
-				if not failed then connect() end
-
-				if failed then gui.register(printMessage) end
 			end
-		else
-			-- Tcp
-			-- Get server defaults
-			local defaults = readsettings("serversettings.txt")
-			local data = tcpDialog(defaults)
 
-			if data then -- If user did not hit cancel
-				trim(data)
+			function connect()
+				mainDriver = GameDriver(spec, data.forceSend) -- Notice: This is a global, specs can use it
 
-				-- Check input valid
-				if not data.startAsServer then
-					if not nonempty(data.server) then scrub("Server") end
-				end
-				if not nonzero(data.port) then scrub("Port") end
-				if not nonempty(data.nickname) then scrub("Nickname") end
-
-				-- Save input for next run
-				writesettings("serversettings.txt", data)
-
-				function connect()
-					mainDriver = GameDriver(spec, data.forceSend)
-					if data.startAsServer then
-						TcpServerPipe(data, mainDriver):wake(Socket())
-					else
-						TcpClientPipe(data, mainDriver):wake(Socket())
-					end
-				end
-
-				if not failed then connect() end
-
-				if failed then gui.register(printMessage)
+				if data.kind == "direct" then
+					require "pipe_direct"
+					DirectPipe({
+						host = data.isHost,
+						host_addr = data.host_addr,
+						port = data.port,
+					}, mainDriver):wake()
+				elseif data.kind == "relay" then
+					require "pipe_relay"
+					RelayPipe({
+						host_addr = data.host_addr,
+						port = data.port,
+						code = data.code,
+					}, mainDriver):wake()
 				else
-					if BizHawk then
-						while true do
-							emu.frameadvance()
-						end
-					end
+					errorMessage("Unknown transport in dialog result")
+					failed = true
 				end
 			end
+
+			if not failed then connect() end
+
+			if failed then gui.register(printMessage) end
 		end
 	end
 else
 	refuseDialog()
-end
-end
-
--- Run only if called directly
--- BizHawk doesn't like emu.frameadvance() being called from requires
-if not pcall(debug.getlocal, 4, 1) then
-	runcoop()
 end

@@ -1,164 +1,157 @@
+local iupOk, iupLoadError = pcall(require, "iuplua")
+local iupUnavailableShown = false
+local connectionConfigError = nil
 
-function readsettings(filename)
-	local function readline(f, data, key)
-		local line = f:read()
-		if line then
-			for token in string.gmatch(line, key .. "=([^%s]+)") do
-				data[key] = token
-				break
-			end
-		end
+local function loadConnectionConfig()
+	package.loaded["coop_config"] = nil
+	local ok, result = pcall(require, "coop_config")
+	if not ok then
+		connectionConfigError = result
+		return nil
 	end
 
-	local defaults = {["isServer"]=false, ["server"]="127.0.0.1", ["port"]="5968", ["nickname"]="User"..math.random(99999)}
-	local f = io.open(filename)
-	if not f then return defaults end
-	readline(f, defaults, "isServer")
-	readline(f, defaults, "server")
-	readline(f, defaults, "port")
-	readline(f, defaults, "nickname")
-	defaults.isServer = defaults.isServer == "true"
-	f:close()
-	return defaults
-end
-
-function writesettings(filename, data)
-	local f = io.open(filename, "w")
-	local line = "isServer="
-	if data.startAsServer then line = line .. "true"
-	else line = line .. "false" end
-	f:write(line .. "\n")
-	f:write("server=" .. data.server .. "\n")
-	f:write("port=" .. data.port .. "\n")
-	f:write("nickname=" .. data.nickname .. "\n")
-	f:close()
-end
-
--- BizHawk
-if BizHawk then
-	-- Dialog
-	tcpDialog = function(defaults)
-		local done = false
-		local result = nil
-
-		function onclose()
-			done = true
-		end
-		local f = forms.newform(500, 210, "Connection Settings", onclose)
-		local h_isServer = forms.checkbox(f, "Start Server", 5, 5)
-		if defaults.isServer then forms.setproperty(h_isServer, "Checked", true) end
-		local h_serverName = forms.textbox(f, defaults.server, 100, 25, nil, 5, 35)
-		local h_port = forms.textbox(f, defaults.port, 50, 25, nil, 5, 65)
-		local h_nickname = forms.textbox(f, defaults.nickname, 100, 25, nil, 5, 95)
-		function onOk()
-			result = {}
-			result.startAsServer = forms.ischecked(h_isServer)
-			result.server = forms.gettext(h_serverName)
-			result.port = tonumber(forms.gettext(h_port))
-			result.nickname = forms.gettext(h_nickname)
-			forms.destroy(f)
-		end
-		local h_ok = forms.button(f, "OK", onOk, 5, 125, 75, 30)
-
-		while not done do
-			emu.frameadvance()
-		end
-
+	connectionConfigError = nil
+	if type(result) == "table" then
 		return result
+	elseif type(coopConfig) == "table" then
+		return coopConfig
+	else
+		connectionConfigError = "coop_config.lua did not return a table"
 	end
 
-	selectDialog = function(specs, reason)
-		local names = {}
-		for i, v in ipairs(specs) do
-			names[i] = v.name
-		end
+	return nil
+end
 
-		local done = false
-		local result = nil
+local function normalizeConnectionConfig(config)
+	if type(config) ~= "table" or config.enabled == false then return nil end
 
-		function onclose()
-			done = true
+	local normalized = {
+		kind = config.kind or "relay",
+		host_addr = config.host_addr,
+		port = tonumber(config.port),
+		code = config.code or "",
+		isHost = config.isHost == true,
+		forceSend = config.forceSend == true,
+	}
+
+	print("Loaded coop_config.lua: kind=" .. tostring(normalized.kind) ..
+		" host=" .. tostring(normalized.host_addr) ..
+		" port=" .. tostring(normalized.port) ..
+		" code_len=" .. tostring(string.len(tostring(normalized.code))))
+	return normalized
+end
+
+local function showIupUnavailable()
+	if iupUnavailableShown then return end
+	iupUnavailableShown = true
+
+	local details = tostring(iupLoadError)
+	print("Cannot load FCEUX connection dialog DLL: " .. details)
+	if details:find("not a valid Win32 application", 1, true) then
+		print("This usually means 64-bit FCEUX is loading the 32-bit FCEUX package.")
+	elseif details:find("Must call iup.Open in main thread", 1, true) then
+		print("This means FCEUX is running Lua on a thread where IUP cannot open the dialog.")
+		print("Edit coop_config.lua next to coop.lua, set enabled = true and enter the session code, then reload coop.lua.")
+	else
+		print("This usually means the FCEUX package does not match your emulator bitness.")
+	end
+	print("Use 32-bit FCEUX with the fceux-win32 package, or 64-bit FCEUX with the fceux-win64 package.")
+	if connectionConfigError then
+		print("Could not load coop_config.lua: " .. tostring(connectionConfigError))
+	end
+	errorMessage("Dialog DLL unavailable; edit coop_config.lua or use a FCEUX package matching your emulator bitness.")
+end
+
+local function showModeConfigRequired(specs, reason)
+	print("Cannot open FCEUX mode selection dialog because the IUP dialog DLL is unavailable.")
+	print("Mode selection reason: " .. tostring(reason))
+	print("Set mode in coop_config.lua to one of these values, then reload coop.lua.")
+	print("Available modes:")
+	for i, spec in ipairs(specs) do
+		print("  " .. tostring(spec.name) .. "  [" .. tostring(spec.guid) .. "]")
+	end
+	errorMessage("Mode selection unavailable; set mode in coop_config.lua.")
+end
+
+-- Bizarre kludge: For reasons I do not understand at all, radio buttons do not work in FCEUX. Switch to menus there only
+local optionLetter = "o"
+if FCEU then optionLetter = "l" end
+
+function connectionDialog()
+	if not iupOk then
+		local normalized = normalizeConnectionConfig(loadConnectionConfig())
+		if normalized then
+			print("Using connection settings from coop_config.lua")
+			return normalized
 		end
-		local f = forms.newform(500, 200, "Select Game", onclose)
-		local l = forms.label(f, "Can't figure out which game to load", 5, 5, 400, 20)
-		local d = forms.dropdown(f, names, 5, 30, 400, 30)
-		function onOk()
-			local chosenGame = forms.gettext(d)
-			for i, v in ipairs(specs) do
-				if v.name == chosenGame then
-					result = v
-					forms.destroy(f)
-					return
+		showIupUnavailable()
+		return nil
+	end
+
+	local res, transport, host_addr, port, code, isHost, forceSend = iup.GetParam(
+	    "Connection settings", nil,
+	    "Transport: %" .. optionLetter .. "|Direct (LAN/Tailscale)|Relay (coop.z1rracing.com)|\n" ..
+		"Host address (Direct: peer's IP, or relay address): %s\n" ..
+		"Port: %i\n" ..
+		"Session code (Relay only, 6+ chars): %s\n" ..
+		"Are you the host? (Direct only) %" .. optionLetter .. "|No|Yes|\n" ..
+		"%t\n" ..
+		"Are you restarting\rafter a crash? %" .. optionLetter .. "|No|Yes|\n",
+	    1, "coop.z1rracing.com", 9999, "", 0, 0)
+
+	if 0 == res then return nil end
+
+	local kind = (transport == 0) and "direct" or "relay"
+	return {
+		kind = kind,
+		host_addr = host_addr,
+		port = port,
+		code = code,
+		isHost = (isHost == 1),
+		forceSend = (forceSend == 1),
+	}
+end
+
+function selectDialog(specs, reason)
+	if not iupOk then
+		local config = loadConnectionConfig()
+		local mode = config and config.mode
+		if mode then
+			for i, spec in ipairs(specs) do
+				if spec.guid == mode or spec.name == mode then
+					print("Using mode from coop_config.lua: " .. spec.name)
+					return spec
 				end
 			end
-			print("Game " .. chosenGame .. " not found")
+			errorMessage("Mode from coop_config.lua not available: " .. tostring(mode))
+			return nil
 		end
-		local ok = forms.button(f, "OK", onOk, 5, 65, 100, 50)
-
-		while not done do
-			emu.frameadvance()
-		end
-
-		return result
+		showModeConfigRequired(specs, reason)
+		showIupUnavailable()
+		return nil
 	end
 
-	function refuseDialog(options)
-		print("Cannot run, No ROM is running.")
-		--iup.Message("Cannot run", "No ROM is running.")
-	end
-else
-	-- Not BizHawk
-	require "iuplua"
-
-	-- Bizarre kludge: For reasons I do not understand at all, radio buttons do not work in FCEUX. Switch to menus there only
-	local optionLetter = "o"
-	if FCEU then optionLetter = "l" end
-
-	function ircDialog()
-		local res, server, port, nick, partner, forceSend = iup.GetParam("Connection settings", nil,
-			"Enter an IRC server: %s\n" ..
-			"IRC server port: %i\n" ..
-			"Your nick: %s\n" ..
-			"Partner nick: %s\n" ..
-			"%t\n" .. -- <hr>
-			"Are you restarting\rafter a crash? %" .. optionLetter .. "|No|Yes|\n"
-			,"irc.speedrunslive.com", 6667, "", "", 0)
-
-		if 0 == res then return nil end
-
-		return {server=server, port=port, nick=nick, partner=partner, forceSend=forceSend==1}
+	local names = ""
+	for i, v in ipairs(specs) do
+		names = names .. v.name .. "|"
 	end
 
-	function tcpDialog(defaults)
-		local startServer = 0
-		if defaults.isServer then startServer = 1 end
-		local res, startAsServer, server, port = iup.GetParam("Connection Settings", nil,
-			"Start Server: %" .. optionLetter .. "|No|Yes|\n" ..
-			"Connect Server: %s\n" ..
-			"Connect Port: %i\n" ..
-			"Nickname: %s\n", startServer, defaults.server, defaults.port, defaults.nickname)
-		if res == 0 then return nil end
-		return {startAsServer=startAsServer == 1, server=server, port=port}
+	local res, selection = iup.GetParam("Select game", nil,
+	    "Can't figure out\rwhich game to load\r(" .. reason .. ")\r" ..
+	    "Which game is this? " ..
+		"%l|" .. names .. "\n",
+		0)
+
+	if 0 == res or nil == selection then return nil end
+
+	return specs[selection + 1]
+end
+
+function refuseDialog(options)
+	if not iupOk then
+		showIupUnavailable()
+		return
 	end
 
-	function selectDialog(specs, reason)
-		local names = ""
-		for i, v in ipairs(specs) do
-			names = names .. v.name .. "|"
-		end
-
-		local res, selection = iup.GetParam("Select game", nil,
-			"Can't figure out\rwhich game to load\r(" .. reason .. ")\r" ..
-			"Which game is this? " ..
-			"%l|" .. names .. "\n",
-			0)
-
-		if 0 == res or nil == selection then return nil end
-
-		return specs[selection + 1]
-	end
-
-	function refuseDialog(options)
-		iup.Message("Cannot run", "No ROM is running.")
-	end
+	iup.Message("Cannot run", "No ROM is running.")
 end

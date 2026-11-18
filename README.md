@@ -1,73 +1,148 @@
-# emu-coop
+# z1rr-coop
 
-This directory contains some Lua scripts that, when loaded by a compliant emulator such as snes9x-rr or FCEUX, can synchronize emulator state over the internet (allowing "cooperative" playthroughs of single-player games).
+z1rr-coop is a Zelda 1 focused expansion of Andi McClure's emu-coop. It lets two players synchronize game state over the internet so single-player games can be played cooperatively across emulators and hardware.
 
-Each game you want to use this with requires a "mode" file in the modes/ directory. **WARNING: Modes are PROGRAMS, like a .exe file. Do not install a mode file unless it came from someone you know and trust.** 
+For the v2.0 release line, the core goal is endpoint interoperability: FCEUX, EverDrive Pro N8, and MiSTer can all participate in the same relay/session system. A player on MiSTer can pair with a player on FCEUX, an EDN8 player can pair with a MiSTer player, two hardware players can pair with each other, and FCEUX-to-FCEUX still works.
 
-To run, run coop.lua. To run with additional debug messages (more verbose errors, and visibility for every message sent) run debug.lua instead.
+Mode files are programs, like `.exe` files. Do not install a mode file unless it came from someone you know and trust.
 
-## Supported Emulators
+For official support for z1rr-coop, please visit the Z1R Racing Discord: <https://discord.gg/MX6EB26HYB>
 
-**Imporant: This is built to run with a fork of BizHawk. [Download it here.](https://github.com/chronogeran/emu-coop/releases)**
+## Supported Endpoints
 
-Please note that not every core in BizHawk is supported. Use the indicated core when playing the given console.
+| Endpoint | How it connects | Notes |
+|---|---|---|
+| FCEUX | Lua scripts from the emulator package | Uses `coop.lua` inside FCEUX. |
+| EverDrive Pro N8 / real NES | PC hardware bridge | The bridge patches/uploads the ROM and talks to the cart over USB. |
+| MiSTer | PC hardware bridge plus custom NES core | The bridge deploys `NES_z1rr-coop.rbf`, starts `mister-helper.py`, and stages ROMs over SSH/SCP. |
 
-Currently supported emulators/consoles:
-* BizHawk
-	* NES: NesHawk
-	* SNES: BSNES
-	* DS: melonDS
-	* PSX: Octoshock
-	* GBA: mgba
-* FCEUXWin32 (NES)
-* snes9x-rr (SNES)
+Any two endpoints can pair together as long as both clients use a compatible release and the same mode:
 
-## Supported Games
+- FCEUX <-> FCEUX
+- FCEUX <-> EDN8
+- FCEUX <-> MiSTer
+- EDN8 <-> MiSTer
+- EDN8 <-> EDN8
+- MiSTer <-> MiSTer
 
-* Blaster Master (NES)
-* Crystalis (NES)
-* Castlevania II: Simon's Quest (NES)
-* Goonies II (NES)
-* The Legend of Zelda (NES)
-* Zelda II: The Adventure of Link (NES)
-* Legacy of the Wizard (NES)
-* Metroid (NES)
-* Solar Jetman (NES)
-* Solstice (NES)
-* The Legend of Zelda: A Link to the Past (SNES)
-* Link to the Past Randomizer (SNES)
-* Super Metroid (SNES)
-* Castlevania: Symphony of the Night (PSX)
-* Castlevania: Circle of the Moon (GBA)
-* Castlevania: Harmony of Dissonance (GBA)
-* Castlevania: Aria of Sorrow (GBA)
-* Castlevania: Dawn of Sorrow (DS)
-* Castlevania: Portrait of Ruin (DS)
-* Castlevania: Order of Ecclesia (DS)
+The bridge currently supports the Zelda 1 modes `tloz_basic`, `tloz_progress`, and `tloz_all`.
 
-Contributions adding more games are welcome. Any game with a good degree of non-linearity or backtracking will work.
+## Connectivity
 
-## List of changes from base emu-coop
+Older emu-coop releases used IRC as the network backbone. z1rr-coop replaces that with client-agnostic transports:
 
-* Implemented raw TCP protocol
-* Support for more than 2 players
-* Support for BizHawk
-* Added games
-* Added 'flags' type
-* Added writeword support for FCEUX
-* Fix writeTrigger's previousValue
+- **Relay**: both players connect outbound to a small Python relay daemon. This is the normal internet play path and requires no port forwarding.
+- **Direct**: peer-to-peer TCP. This is useful for LAN play or private networks such as Tailscale, ZeroTier, or Hamachi.
 
-## See Also
+The relay protocol is endpoint-neutral. FCEUX Lua clients and hardware bridge clients use the same session-code workflow, so the relay does not care whether a peer is FCEUX, EDN8, MiSTer, or a future client.
 
-Other similar projects providing access to multiplayer modes:
-* http://multitroid.com/
-* https://github.com/milesthenerd/bizhawk-co-op-metroid-fusion
-* https://github.com/milesthenerd/AM2R-Multitroid
+Packaged clients default to the public relay at `coop.z1rracing.com:9999`.
+
+Self-hosters can run their own relay; see [relay/README.md](relay/README.md).
+
+## PC Hardware Bridge
+
+The hardware bridge is the Windows app that makes real hardware feel like another Z1RR-coop endpoint.
+
+For **EverDrive Pro N8**, the bridge:
+
+- Validates and patches the user's Zelda 1 ROM.
+- Uploads the patched ROM to the EDN8 over USB.
+- Reads and writes game memory through the EDN8 USB protocol.
+- Joins the shared relay session as a normal peer.
+
+For **MiSTer**, the bridge:
+
+- Connects to MiSTer over SSH using the user-provided host/IP.
+- Deploys the custom `NES_z1rr-coop.rbf` NES core without overwriting the stock `NES.rbf`.
+- Deploys and starts `mister-helper.py`.
+- Stages source ROMs under `/media/fat/games/NES/z1rr-coop/`.
+- Reads and writes NES memory through the MiSTer helper/core path.
+
+For bridge details, see [bridge/README.md](bridge/README.md).
+
+## Downloads
+
+Current beta8 release:
+
+- Hardware bridge for EDN8 and MiSTer: `dist/hardware/z1rr-coop-2.0-beta8-hardware.exe`
+- Emulator package for 32-bit FCEUX: `dist/emu/z1rr-coop-2.0-beta8-fceux-win32.zip`
+- Emulator package for 64-bit FCEUX: `dist/emu/z1rr-coop-2.0-beta8-fceux-win64.zip`
+
+Release page:
+
+<https://github.com/BogieSmalls/z1rr-coop/releases/tag/v2.0.0-beta.8>
+
+## Quick Start
+
+### FCEUX
+
+1. Download and extract the FCEUX zip that matches your FCEUX bitness: `fceux-win32.zip` for 32-bit FCEUX or `fceux-win64.zip` for 64-bit FCEUX.
+2. Launch FCEUX and load your Zelda 1 ROM.
+3. From the FCEUX Lua menu, load `coop.lua`.
+4. Choose Relay or Direct, enter the agreed session code, and select the same Zelda 1 mode as your partner.
+
+FCEUX native Lua modules must match the emulator process bitness. Running the 32-bit package under 64-bit FCEUX, or the 64-bit package under 32-bit FCEUX, can fail with a native DLL load error such as `iuplua.dll: %1 is not a valid Win32 application`.
+
+Some 64-bit FCEUX builds run Lua on a thread where IUP cannot open the connection dialog. If the log says `Must call iup.Open in main thread`, edit `coop_config.lua` in the extracted FCEUX package, set `enabled = true`, enter the shared relay session code, confirm the `mode` value, save, and reload `coop.lua`. The packaged fallback config preselects Zelda 1 "sync most things"; change it there if you are testing a different mode.
+
+### EverDrive Pro N8
+
+1. Download and run the hardware bridge.
+2. Choose `EverDrive Pro N8`.
+3. Select your Zelda 1 ROM.
+4. Let the bridge patch and upload the ROM to the cart.
+5. Choose the same relay/session code and mode as your partner.
+
+### MiSTer
+
+1. Download and run the hardware bridge.
+2. Choose `MiSTer`.
+3. Enter the MiSTer host/IP, username, and password.
+4. Let the bridge deploy the custom core, helper, and ROM.
+5. Launch the deployed `NES_z1rr-coop` core and staged ROM, then connect with the same relay/session code and mode as your partner.
+
+## Project Layout
+
+- `modes/`: Zelda 1 Lua mode files used by the FCEUX-side client.
+- `bridge/`: Python hardware bridge, GUI, CLI, EDN8 support, MiSTer support, and bridge tests.
+- `relay/`: relay daemon for internet sessions.
+- `mister/`: vendored MiSTer NES core project and build notes for `NES_z1rr-coop.rbf`.
+- `dist/emu/`: FCEUX release packages.
+- `dist/hardware/`: hardware bridge release packages.
+
+## Development
+
+Build all distributables:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-all.ps1
+```
+
+Run bridge tests:
+
+```powershell
+cd bridge
+uv run python -m pytest tests/ -v
+```
+
+Build the MiSTer core payload:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\build-mister-core.ps1
+```
+
+## Roadmap
+
+Planned work after the v2.0 stabilization push:
+
+- Add more gameplay modes, including DIBS-style competitive Zelda 1 modes once the bridge-side sync engine supports their extra write semantics cleanly.
+- Add additional emulator endpoints, with BizHawk and Mesen as likely next targets.
+- Continue reducing setup friction for hardware players.
 
 ## Author / License
 
-This is Chronogeran's fork of emu-coop. The original was written by
-<<andi.m.mcclure@gmail.com>>. The "tloz_" modes (Zelda 1) were written by megmacAttack.
+These files were written by <<andi.m.mcclure@gmail.com>>. The "tloz_" modes (Zelda 1) were written by megmacAttack.
 
 Big thanks to:
 * The LTTP Randomizer team, esp. Mike Trethewey, Zarby89 and Karkat, for information
@@ -165,3 +240,9 @@ Included in this directory is IUP. Here is its license:
 	LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
 	FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 	DEALINGS IN THE SOFTWARE.
+
+## Merged from chronogeran/emu-coop
+
+This branch keeps z1rr-coop's relay/direct transports, hardware bridge and MiSTer/EDN8 support, and adds the additional game modes from chronogeran/emu-coop. It also adds the `flags` record kind to the driver so the Crystalis and Legacy of the Wizard modes work.
+
+The z1rr bridge currently only implements the three Zelda 1 modes (`tloz_basic`, `tloz_progress`, `tloz_all`); the other modes are available to FCEUX/SNES/GBA/DS clients.
