@@ -40,18 +40,18 @@ def test_legacy_edn8_builder_delegates_to_hardware_builder():
     assert "build-hardware.ps1" in script
 
 
-def test_fceux_lua_modes_are_z1_only():
+def test_fceux_lua_modes_include_z1_and_chronogeran_modes():
+    # Upstream z1rr-coop ships only the three Zelda 1 modes. This branch also
+    # carries the additional game modes merged from chronogeran/emu-coop.
     mode_names = sorted(path.name for path in (REPO_ROOT / "modes").glob("*.lua"))
 
-    assert mode_names == [
-        "index.lua",
-        "tloz_all.lua",
-        "tloz_basic.lua",
-        "tloz_progress.lua",
-    ]
+    for name in ["tloz_all.lua", "tloz_basic.lua", "tloz_progress.lua"]:
+        assert name in mode_names
+
     index = (REPO_ROOT / "modes" / "index.lua").read_text(encoding="utf-8")
-    assert "modes.tloz_all" in index
-    assert "modes.tloz_progress" in index
-    assert "modes.tloz_basic" in index
-    assert "modes.lttp" not in index
-    assert "modes.super_metroid" not in index
+    for mode in ["modes.tloz_all", "modes.tloz_progress", "modes.tloz_basic"]:
+        assert mode in index
+
+    for name in ["lttp.lua", "lttp_randomizer.lua", "super_metroid.lua", "crystalis.lua"]:
+        assert name in mode_names
+        assert f'"modes.{name[:-4]}"' in index
